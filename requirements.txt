@@ -1,8 +1,1 @@
-requests
-websocket-client
-numpy
-polars
-ta
-scikit-learn
-tensorflow
-pycryptodome
+pip install requests numpy pandas scikit-learn tensorflow ta
