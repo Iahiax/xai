@@ -1,1 +1,8 @@
-pip install requests websocket-client tensorflow scikit-learn ta polars rich matplotlib numpy
+requests
+websocket-client
+numpy
+polars
+ta
+scikit-learn
+tensorflow
+pycryptodome
