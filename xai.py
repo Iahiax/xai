@@ -1,4 +1,4 @@
-pip install requests websocket-client numpy polars ta scikit-learn tensorflow pycryptodome
+#pip install requests websocket-client numpy polars ta scikit-learn tensorflow pycryptodome
 import os
 import time
 import json
