@@ -1,1 +1,1 @@
-pip install requests numpy pandas scikit-learn tensorflow ta
+pip install requests numpy pandas scikit-learn tensorflow-cpu ta
