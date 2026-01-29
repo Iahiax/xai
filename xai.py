@@ -1,13 +1,18 @@
 # =========================================================
-# CAPITAL.COM EURUSD AI BOT - FULL FINAL VERSION
+# CAPITAL.COM EURUSD AI BOT - FINAL FIXED VERSION
 # LSTM + RL + NEWS + REAL WIN RATE + AUTO SESSION
-# SINGLE FILE - EVERYTHING INCLUDED
+# SINGLE FILE - DEMO READY
 # =========================================================
 
-import time, requests, numpy as np, pandas as pd
+import time
+import requests
+import numpy as np
+import pandas as pd
+
 from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
+
 from ta.trend import ADXIndicator
 from ta.volatility import AverageTrueRange
 
@@ -37,7 +42,11 @@ RETRAIN_EVERY = 25
 
 # ================== MEMORY ==================
 
-TRAINING_MEMORY = {"strong": [], "medium": [], "max": 9000}
+TRAINING_MEMORY = {
+    "strong": [],
+    "medium": [],
+    "max": 9000
+}
 
 STATS = {
     "trades": 0,
@@ -46,6 +55,7 @@ STATS = {
     "last_trade_time": 0
 }
 
+# Reinforcement Learning Q-table
 Q = {
     "strong_BUY": 1.0,
     "strong_SELL": 1.0,
@@ -56,31 +66,67 @@ Q = {
 ALPHA = 0.1
 GAMMA = 0.9
 
-# ================== AUTH ==================
+# ================== AUTH (FIXED) ==================
 
 def login():
     r = requests.post(
         f"{BASE_URL}/session",
-        headers={"X-CAP-API-KEY": API_KEY},
-        json={"identifier": IDENTIFIER, "password": PASSWORD}
+        headers={
+            "X-CAP-API-KEY": API_KEY,
+            "Content-Type": "application/json"
+        },
+        json={
+            "identifier": IDENTIFIER,
+            "password": PASSWORD
+        },
+        timeout=10
     )
-    return {"CST": r.headers["CST"], "X-SECURITY-TOKEN": r.headers["X-SECURITY-TOKEN"]}
+
+    if r.status_code != 200:
+        print("❌ LOGIN FAILED")
+        print("Status:", r.status_code)
+        print("Response:", r.text)
+        raise SystemExit("Fix API credentials or enable API access")
+
+    if "CST" not in r.headers or "X-SECURITY-TOKEN" not in r.headers:
+        print("❌ SESSION TOKENS NOT RETURNED")
+        print("Headers:", dict(r.headers))
+        raise SystemExit("Capital.com did not return CST")
+
+    print("✅ Login successful")
+    return {
+        "CST": r.headers.get("CST"),
+        "X-SECURITY-TOKEN": r.headers.get("X-SECURITY-TOKEN")
+    }
 
 def safe_request(method, url, tokens, **kw):
-    h = kw.pop("headers", {})
-    h.update({
+    headers = kw.pop("headers", {})
+    headers.update({
         "X-CAP-API-KEY": API_KEY,
         "CST": tokens["CST"],
         "X-SECURITY-TOKEN": tokens["X-SECURITY-TOKEN"]
     })
-    r = requests.request(method, url, headers=h, timeout=10, **kw)
+
+    r = requests.request(
+        method,
+        url,
+        headers=headers,
+        timeout=10,
+        **kw
+    )
+
     if r.status_code in [401, 403]:
+        print("🔄 Session expired — relogin")
         tokens.update(login())
-        h.update(tokens)
-        r = requests.request(method, url, headers=h, timeout=10, **kw)
+        headers.update({
+            "CST": tokens["CST"],
+            "X-SECURITY-TOKEN": tokens["X-SECURITY-TOKEN"]
+        })
+        r = requests.request(method, url, headers=headers, timeout=10, **kw)
+
     return r
 
-# ================== NEWS FILTER ==================
+# ================== NEWS ==================
 
 def get_news_score():
     try:
@@ -96,7 +142,7 @@ def get_news_score():
             timeout=5
         )
         articles = r.json().get("articles", [])
-        negative = ["crisis", "inflation", "recession", "panic", "collapse", "risk"]
+        negative = ["crisis", "recession", "panic", "collapse", "risk", "inflation"]
         score = 0
         for a in articles:
             title = (a["title"] or "").lower()
@@ -114,15 +160,19 @@ def get_prices(tokens):
         "GET",
         f"{BASE_URL}/prices/{EPIC}",
         tokens,
-        params={"resolution": TIMEFRAME, "max": HISTORY_BARS}
+        params={
+            "resolution": TIMEFRAME,
+            "max": HISTORY_BARS
+        }
     )
-    p = r.json()["prices"]
+
+    prices = r.json()["prices"]
     return pd.DataFrame([{
-        "open": float(x["openPrice"]["bid"]),
-        "high": float(x["highPrice"]["bid"]),
-        "low": float(x["lowPrice"]["bid"]),
-        "close": float(x["closePrice"]["bid"])
-    } for x in p])
+        "open": float(p["openPrice"]["bid"]),
+        "high": float(p["highPrice"]["bid"]),
+        "low": float(p["lowPrice"]["bid"]),
+        "close": float(p["closePrice"]["bid"])
+    } for p in prices])
 
 def data_quality_ok(df):
     if df.isna().sum().sum() > 0:
@@ -134,48 +184,55 @@ def data_quality_ok(df):
 # ================== ML ==================
 
 def build_model(shape):
-    m = Sequential([
+    model = Sequential([
         LSTM(64, return_sequences=True, input_shape=shape),
         Dropout(0.2),
         LSTM(32),
         Dense(1, activation="sigmoid")
     ])
-    m.compile("adam", "binary_crossentropy")
-    return m
+    model.compile(optimizer="adam", loss="binary_crossentropy")
+    return model
 
 def update_memory(df):
     adx = ADXIndicator(df.high, df.low, df.close).adx()
-    for c, a in zip(df.close, adx):
+    for price, a in zip(df.close, adx):
         if a >= 30:
-            TRAINING_MEMORY["strong"].append(c)
+            TRAINING_MEMORY["strong"].append(price)
         elif a >= 20:
-            TRAINING_MEMORY["medium"].append(c)
+            TRAINING_MEMORY["medium"].append(price)
+
     for k in ["strong", "medium"]:
         TRAINING_MEMORY[k] = TRAINING_MEMORY[k][-TRAINING_MEMORY["max"]:]
 
 def prepare(bucket):
-    d = TRAINING_MEMORY[bucket]
-    if len(d) < SEQ_LEN + 50:
+    data = TRAINING_MEMORY[bucket]
+    if len(data) < SEQ_LEN + 50:
         return None, None, None
-    sc = MinMaxScaler()
-    d = sc.fit_transform(np.array(d).reshape(-1, 1))
+
+    scaler = MinMaxScaler()
+    data = scaler.fit_transform(np.array(data).reshape(-1, 1))
+
     X, y = [], []
-    for i in range(SEQ_LEN, len(d)):
-        X.append(d[i-SEQ_LEN:i])
-        y.append(1 if d[i] > d[i-1] else 0)
-    return np.array(X), np.array(y), sc
+    for i in range(SEQ_LEN, len(data)):
+        X.append(data[i - SEQ_LEN:i])
+        y.append(1 if data[i] > data[i - 1] else 0)
+
+    return np.array(X), np.array(y), scaler
 
 def train_models():
-    out = {}
-    for b in ["strong", "medium"]:
-        X, y, sc = prepare(b)
+    models = {}
+    for bucket in ["strong", "medium"]:
+        X, y, scaler = prepare(bucket)
         if X is None:
-            out[b] = (None, None)
+            models[bucket] = (None, None)
             continue
-        m = build_model((X.shape[1], 1))
-        m.fit(X, y, epochs=5, batch_size=32, verbose=0)
-        out[b] = (m, sc)
-    return out
+
+        model = build_model((X.shape[1], 1))
+        model.fit(X, y, epochs=5, batch_size=32, verbose=0)
+        models[bucket] = (model, scaler)
+        print(f"🧠 Trained {bucket} model | samples {len(X)}")
+
+    return models
 
 # ================== RL ==================
 
@@ -192,7 +249,12 @@ def close_opposite(tokens, side):
     for p in r.json().get("positions", []):
         pos = p["position"]
         if pos["epic"] == EPIC and pos["direction"] != side:
-            safe_request("DELETE", f"{BASE_URL}/positions/{pos['dealId']}", tokens)
+            safe_request(
+                "DELETE",
+                f"{BASE_URL}/positions/{pos['dealId']}",
+                tokens
+            )
+            print("❌ Closed opposite position")
 
 def open_trade(tokens, side, df, regime, news_score):
     if not can_trade():
@@ -200,14 +262,17 @@ def open_trade(tokens, side, df, regime, news_score):
 
     close_opposite(tokens, side)
 
-    atr = AverageTrueRange(df.high, df.low, df.close).average_true_range().iloc[-1]
+    atr = AverageTrueRange(df.high, df.low, df.close)\
+        .average_true_range().iloc[-1]
+
     price = df.close.iloc[-1]
 
-    sl, tp = (
-        (price - atr * 1.2, price + atr * 2.4)
-        if side == "BUY"
-        else (price + atr * 1.2, price - atr * 2.4)
-    )
+    if side == "BUY":
+        sl = price - atr * 1.2
+        tp = price + atr * 2.4
+    else:
+        sl = price + atr * 1.2
+        tp = price - atr * 2.4
 
     safe_request(
         "POST",
@@ -225,25 +290,33 @@ def open_trade(tokens, side, df, regime, news_score):
 
     STATS["trades"] += 1
     STATS["last_trade_time"] = time.time()
+
     print(f"📈 {side} | Regime:{regime} | News:{news_score}")
 
 # ================== WIN RATE ==================
 
 def update_winrate(tokens):
     r = safe_request("GET", f"{BASE_URL}/history/activity", tokens)
-    acts = r.json().get("activities", [])
-    wins = losses = 0
-    for a in acts:
-        if a.get("profitAndLoss") is not None:
-            if a["profitAndLoss"] > 0:
-                wins += 1
-            elif a["profitAndLoss"] < 0:
-                losses += 1
-    STATS["wins"], STATS["losses"] = wins, losses
-    if wins + losses > 0:
-        print(f"📊 Win Rate: {wins/(wins+losses)*100:.2f}%")
+    activities = r.json().get("activities", [])
 
-# ================== RUN ==================
+    wins = losses = 0
+    for a in activities:
+        pnl = a.get("profitAndLoss")
+        if pnl is None:
+            continue
+        if pnl > 0:
+            wins += 1
+        elif pnl < 0:
+            losses += 1
+
+    STATS["wins"] = wins
+    STATS["losses"] = losses
+
+    if wins + losses > 0:
+        winrate = wins / (wins + losses) * 100
+        print(f"📊 Win Rate: {winrate:.2f}%")
+
+# ================== MAIN LOOP ==================
 
 def run():
     tokens = login()
@@ -252,6 +325,7 @@ def run():
 
     while True:
         df = get_prices(tokens)
+
         if not data_quality_ok(df):
             time.sleep(POLL_INTERVAL)
             continue
@@ -269,26 +343,35 @@ def run():
             continue
 
         adx = ADXIndicator(df.high, df.low, df.close).adx().iloc[-1]
-        regime = "strong" if adx >= 30 else "medium" if adx >= 20 else None
-        if not regime:
+        if adx >= 30:
+            regime = "strong"
+        elif adx >= 20:
+            regime = "medium"
+        else:
             time.sleep(POLL_INTERVAL)
             continue
 
-        model, sc = models[regime]
+        model, scaler = models[regime]
         if not model:
             time.sleep(POLL_INTERVAL)
             continue
 
-        x = sc.transform(df.close.values[-SEQ_LEN:].reshape(-1, 1))
-        prob = model.predict(x.reshape(1, SEQ_LEN, 1), verbose=0)[0][0]
+        x = scaler.transform(
+            df.close.values[-SEQ_LEN:].reshape(-1, 1)
+        )
 
-        score_buy = prob * Q[f"{regime}_BUY"] * (1 + news_score * 0.05)
-        score_sell = (1 - prob) * Q[f"{regime}_SELL"] * (1 + news_score * 0.05)
+        prob = model.predict(
+            x.reshape(1, SEQ_LEN, 1),
+            verbose=0
+        )[0][0]
 
-        if score_buy > THRESHOLD_BUY:
+        buy_score = prob * Q[f"{regime}_BUY"] * (1 + news_score * 0.05)
+        sell_score = (1 - prob) * Q[f"{regime}_SELL"] * (1 + news_score * 0.05)
+
+        if buy_score > THRESHOLD_BUY:
             open_trade(tokens, "BUY", df, regime, news_score)
             update_q(f"{regime}_BUY", 1)
-        elif score_sell > (1 - THRESHOLD_SELL):
+        elif sell_score > (1 - THRESHOLD_SELL):
             open_trade(tokens, "SELL", df, regime, news_score)
             update_q(f"{regime}_SELL", 1)
 
