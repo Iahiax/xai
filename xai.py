@@ -13,11 +13,11 @@ from ta.volatility import AverageTrueRange
 
 # ================== CONFIG ==================
 
-API_KEY = "PUT_API_KEY"
-IDENTIFIER = "PUT_EMAIL"
-PASSWORD = "PUT_PASSWORD"
+API_KEY = "4YVCSQJ8FGNXZQ7K"
+IDENTIFIER = "yahia.x@outlook.sa"
+PASSWORD = "Yahia-1411"
 
-NEWS_API_KEY = "PUT_NEWS_API_KEY"
+NEWS_API_KEY = "ba0a4d6fcb234b57a7a05fbfe80ae701"
 NEWS_QUERY = "EURUSD OR euro OR dollar OR ECB OR FED"
 NEWS_NEGATIVE_THRESHOLD = -3
 
